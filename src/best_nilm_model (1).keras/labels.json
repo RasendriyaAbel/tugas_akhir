@@ -1,0 +1,23 @@
+{
+  "labels": [
+    "amplifier",
+    "charger_hp",
+    "charger_hp+amplifier",
+    "charger_laptop",
+    "dispenser",
+    "hair_dryer",
+    "hairdryer+dispenser",
+    "hp+laptop",
+    "kipas_angin",
+    "kipas_angin+amplifier+charger_laptop",
+    "laptop+dispenser",
+    "setrika"
+  ],
+  "source": "final_pipeline (8).ipynb",
+  "model_reference": "nilm_cnn_bilstm_attn_v6",
+  "applied_to_model": "nilm_cnn_bilstm_attn_v6",
+  "notes": [
+    "Urutan label diambil dari konfigurasi CLASSES pada notebook training terbaru.",
+    "Jumlah label sudah diselaraskan dengan output 12 kelas model aktif v6."
+  ]
+}
