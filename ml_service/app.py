@@ -1,5 +1,7 @@
 import json
 import os
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
@@ -31,6 +33,7 @@ _LABEL_SOURCE_CACHE = None
 _LABELS_CACHE_KEY = None
 _MODEL_META_CACHE = None
 _EMA_PROBS = None
+_PRED_QUEUE = deque(maxlen=5)
 _PREV_POWER = None
 _LATEST_RESULT = None
 _REQUEST_COUNT = 0
@@ -57,6 +60,61 @@ def _sanitize_keras_config(value):
   if isinstance(value, list):
     return [_sanitize_keras_config(item) for item in value]
   return value
+
+
+def _get_custom_objects(tf):
+  try:
+    register = tf.keras.saving.register_keras_serializable(package="nilm_v9")
+  except AttributeError:
+    try:
+      register = tf.keras.utils.register_keras_serializable(package="nilm_v9")
+    except AttributeError:
+      register = lambda cls: cls
+
+  @register
+  class TemporalSum(tf.keras.layers.Layer):
+    def call(self, inputs):
+      return tf.reduce_sum(inputs, axis=1)
+
+    def get_config(self):
+      return super().get_config()
+
+  def weighted_bce(y_true, y_pred):
+    return tf.reduce_mean(tf.keras.losses.binary_crossentropy(y_true, y_pred))
+
+  def exact_match(y_true, y_pred):
+    pred_bin = tf.cast(y_pred >= 0.5, tf.float32)
+    match = tf.reduce_all(tf.equal(pred_bin, y_true), axis=1)
+    return tf.reduce_mean(tf.cast(match, tf.float32))
+
+  return {
+    "TemporalSum": TemporalSum,
+    "weighted_bce": weighted_bce,
+    "exact_match": exact_match,
+  }
+
+
+def _load_model_from_archive(keras_file: Path, tf, custom_objects):
+  with zipfile.ZipFile(keras_file) as archive:
+    sanitized_config = _sanitize_keras_config(json.loads(archive.read("config.json").decode("utf-8")))
+    weights_bytes = archive.read("model.weights.h5")
+
+  with tempfile.TemporaryDirectory() as temp_dir:
+    weights_path = Path(temp_dir) / "model.weights.h5"
+    weights_path.write_bytes(weights_bytes)
+
+    model = tf.keras.models.model_from_json(json.dumps(sanitized_config), custom_objects=custom_objects)
+    model.load_weights(str(weights_path))
+    return model
+
+
+def _load_model_from_files(root: Path, tf, custom_objects):
+  config_path = root / "config.json"
+  weights_path = root / "model.weights.h5"
+  sanitized_config = _sanitize_keras_config(_read_json(config_path))
+  model = tf.keras.models.model_from_json(json.dumps(sanitized_config), custom_objects=custom_objects)
+  model.load_weights(str(weights_path))
+  return model
 
 
 def _model_root() -> Path:
@@ -173,16 +231,34 @@ def _read_model_meta():
     if isinstance(meta.get("window_size"), int) and isinstance(meta.get("n_features"), int):
       input_shape = [meta["window_size"], meta["n_features"]]
 
+    devices = meta.get("devices")
+    has_device_list = isinstance(devices, list) and all(isinstance(item, str) for item in devices)
+    problem_type = "multilabel" if has_device_list else "multiclass"
     output_units = meta.get("n_classes")
     if not isinstance(output_units, int) or output_units <= 0:
-      session_to_label = meta.get("session_to_label")
-      if isinstance(session_to_label, dict):
-        output_units = len(session_to_label)
+      if problem_type == "multilabel" and isinstance(meta.get("n_devices"), int) and meta["n_devices"] > 0:
+        output_units = meta["n_devices"]
+      elif isinstance(meta.get("classes"), list):
+        output_units = len([item for item in meta["classes"] if isinstance(item, str) and item.strip()])
+      else:
+        session_to_label = meta.get("session_to_label")
+        if isinstance(session_to_label, dict):
+          output_units = len(session_to_label)
+
+    if has_device_list:
+      devices = [item.strip() for item in devices if isinstance(item, str) and item.strip()]
+    else:
+      devices = None
 
     _MODEL_META_CACHE = {
       "model_name": model_name,
       "input_shape": input_shape,
       "output_units": output_units,
+      "problem_type": problem_type,
+      "devices": devices,
+      "threshold": meta.get("threshold"),
+      "smooth_n": meta.get("smooth_n"),
+      "session_to_label": meta.get("session_to_label"),
       "scaler_mean": meta.get("scaler_mean"),
       "scaler_scale": meta.get("scaler_scale"),
       "noise_floor_w": meta.get("noise_floor_w"),
@@ -213,6 +289,7 @@ def _read_model_meta():
     "model_name": model_name,
     "input_shape": input_shape,
     "output_units": output_units,
+    "problem_type": "multiclass",
   }
   return _MODEL_META_CACHE
 
@@ -242,10 +319,14 @@ def _load_labels():
 
   if meta_path.exists():
     meta = _read_json(meta_path)
+    devices = meta.get("devices")
     classes = meta.get("classes")
     labels = []
 
-    if classes is None:
+    if isinstance(devices, list) and all(isinstance(item, str) for item in devices):
+      labels = [item.strip() for item in devices if item.strip()]
+      _LABEL_SOURCE_CACHE = "meta_nilm.json:devices"
+    elif classes is None:
       session_to_label = meta.get("session_to_label")
       if isinstance(session_to_label, dict):
         seen = set()
@@ -256,13 +337,16 @@ def _load_labels():
               seen.add(label)
               labels.append(label)
       else:
-        raise ValueError("meta_nilm.json invalid: field 'classes' harus array string atau field 'session_to_label' harus object string")
+        raise ValueError("meta_nilm.json invalid: field 'classes' harus array string, field 'devices' harus array string, atau field 'session_to_label' harus object string")
+      _LABEL_SOURCE_CACHE = "meta_nilm.json:session_to_label"
     else:
       if not isinstance(classes, list) or not all(isinstance(item, str) for item in classes):
         raise ValueError("meta_nilm.json invalid: field 'classes' harus array string")
       labels = [item.strip() for item in classes if item.strip()]
+      _LABEL_SOURCE_CACHE = "meta_nilm.json:classes"
 
-    _LABEL_SOURCE_CACHE = "meta_nilm.json"
+    if isinstance(output_units, int) and output_units > 0 and len(labels) != output_units:
+      raise ValueError(f"Jumlah label runtime ({len(labels)}) tidak cocok dengan output model ({output_units})")
   elif labels_path.exists():
     configured_labels = _read_json(labels_path).get("labels", [])
     if not isinstance(configured_labels, list) or not all(isinstance(item, str) for item in configured_labels):
@@ -297,11 +381,65 @@ def _load_labels():
   return _LABELS_CACHE
 
 
-
 def _get_label_source():
   if _LABEL_SOURCE_CACHE is None:
     _load_labels()
   return _LABEL_SOURCE_CACHE
+
+
+def _ensure_runtime_state():
+  global _SEQ_BUFFER, _PRED_QUEUE
+  meta = _read_model_meta()
+  input_shape = meta.get("input_shape") or []
+  seq_len = int(input_shape[0]) if len(input_shape) >= 2 and isinstance(input_shape[0], int) else 99
+  smooth_n = int(meta.get("smooth_n") or 5)
+  smooth_n = max(1, smooth_n)
+
+  if _SEQ_BUFFER.maxlen != seq_len:
+    _SEQ_BUFFER = deque(list(_SEQ_BUFFER)[-seq_len:], maxlen=seq_len)
+
+  if _PRED_QUEUE.maxlen != smooth_n:
+    _PRED_QUEUE = deque(list(_PRED_QUEUE)[-smooth_n:], maxlen=smooth_n)
+
+
+def _label_to_device_key(label: str, devices: list[str]):
+  if not isinstance(label, str):
+    return None
+
+  normalized = label.strip()
+  if not normalized:
+    return None
+  if normalized == "idle":
+    return frozenset()
+  if normalized == "full_load" and devices:
+    return frozenset(devices)
+
+  parts = [item.strip() for item in normalized.split("+") if item.strip()]
+  return frozenset(parts) if parts else frozenset()
+
+
+def _active_devices_from_label(label: str, devices: list[str]):
+  key = _label_to_device_key(label, devices)
+  if key is None:
+    return []
+
+  device_set = set(devices)
+  return [device for device in devices if device in key and device in device_set]
+
+
+def _multilabel_name_lookup(meta: dict):
+  devices = meta.get("devices")
+  if not isinstance(devices, list):
+    return {frozenset(): "idle"}
+
+  lookup = {frozenset(): "idle"}
+  session_to_label = meta.get("session_to_label")
+  if isinstance(session_to_label, dict):
+    for label in session_to_label.values():
+      key = _label_to_device_key(label, devices)
+      if key is not None and key not in lookup:
+        lookup[key] = label.strip()
+  return lookup
 
 
 def _get_model():
@@ -310,10 +448,11 @@ def _get_model():
     return _MODEL
 
   try:
-    from keras.models import model_from_json
-    from keras.saving import load_model
+    import tensorflow as tf
   except Exception as exc:
-    raise RuntimeError(f"Keras tidak tersedia: {exc}") from exc
+    raise RuntimeError(f"TensorFlow/Keras tidak tersedia: {exc}") from exc
+
+  custom_objects = _get_custom_objects(tf)
 
   model_source = MODEL_DIR
   keras_file = _find_keras_file()
@@ -321,19 +460,27 @@ def _get_model():
     model_source = keras_file
 
   try:
-    _MODEL = load_model(str(model_source), compile=False)
+    if keras_file is not None:
+      _MODEL = tf.keras.models.load_model(
+        str(model_source),
+        custom_objects=custom_objects,
+        compile=False,
+        safe_mode=False,
+      )
+    else:
+      _MODEL = _load_model_from_files(_model_root(), tf, custom_objects)
   except Exception as exc:
     root = _model_root()
     config_path = root / "config.json"
     weights_path = root / "model.weights.h5"
 
-    if not config_path.exists() or not weights_path.exists():
-      raise RuntimeError(f"Gagal load model dari {model_source}: {exc}") from exc
-
     try:
-      sanitized_config = _sanitize_keras_config(_read_json(config_path))
-      _MODEL = model_from_json(json.dumps(sanitized_config))
-      _MODEL.load_weights(str(weights_path))
+      if keras_file is not None:
+        _MODEL = _load_model_from_archive(keras_file, tf, custom_objects)
+      elif config_path.exists() and weights_path.exists():
+        _MODEL = _load_model_from_files(root, tf, custom_objects)
+      else:
+        raise RuntimeError(f"Gagal load model dari {model_source}: {exc}") from exc
     except Exception as rebuild_exc:
       raise RuntimeError(f"Gagal load model dari {model_source}: {rebuild_exc}") from rebuild_exc
 
@@ -403,6 +550,20 @@ def _apply_smoothing(probs: np.ndarray, alpha: float):
   alpha = 0.0 if alpha < 0 else 1.0 if alpha > 1 else alpha
   _EMA_PROBS = (alpha * probs) + ((1.0 - alpha) * _EMA_PROBS)
   return _EMA_PROBS
+
+
+def _majority_vote_label():
+  if not _PRED_QUEUE:
+    return None
+
+  counts = {}
+  order = {}
+  for index, label in enumerate(_PRED_QUEUE):
+    counts[label] = counts.get(label, 0) + 1
+    if label not in order:
+      order[label] = index
+
+  return max(counts, key=lambda label: (counts[label], -order[label]))
 
 
 def _format_buffer_bar(current: int, total: int, width: int = 20):
@@ -598,9 +759,11 @@ def _run_samples(samples: list[dict], payload: dict | None):
   update_blynk = bool((payload or {}).get("update_blynk", False))
 
   with _LOCK:
+    _ensure_runtime_state()
     _SEQ_BUFFER.clear()
     global _EMA_PROBS, _LAST_RAW_SAMPLE
     _EMA_PROBS = None
+    _PRED_QUEUE.clear()
     _LAST_RAW_SAMPLE = None
 
   timeline = []
@@ -608,9 +771,11 @@ def _run_samples(samples: list[dict], payload: dict | None):
 
   for index, sample in enumerate(samples, start=1):
     with _LOCK:
+      _ensure_runtime_state()
       if _should_reset_buffer_for_device_change(sample):
         _SEQ_BUFFER.clear()
         _EMA_PROBS = None
+        _PRED_QUEUE.clear()
 
       features = _extract_features_from_sample(sample)
       _SEQ_BUFFER.append(features.tolist())
@@ -646,6 +811,7 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
   global _EMA_PROBS, _REQUEST_COUNT
   _REQUEST_COUNT += 1
 
+  _ensure_runtime_state()
   labels = _load_labels()
   label_source = _get_label_source()
   model = _get_model()
@@ -661,11 +827,10 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
     raise RuntimeError(f"Output model {probs.size} tidak cocok dengan labels {len(labels)}")
 
   smoothing = str((payload or {}).get("smoothing", "ema")).lower()
-  if smoothing == "ema":
+  alpha = None
+  if (meta.get("problem_type") or "multiclass") != "multilabel" and smoothing == "ema":
     alpha = float((payload or {}).get("ema_alpha", 0.6))
     probs = _apply_smoothing(probs, alpha)
-  else:
-    alpha = None
 
   top_index = int(np.argmax(probs))
   top_label = labels[top_index]
@@ -680,38 +845,63 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
   third_label = labels[third_index]
   third_confidence = float(probs[third_index]) * 100.0
 
-  prefer_non_uncertain = bool((payload or {}).get("prefer_non_uncertain", True))
-  uncertain_label = str((payload or {}).get("uncertain_label", "uncertain"))
-  min_second_confidence = float((payload or {}).get("min_second_confidence", 25.0))
-
-  chosen_index = top_index
-  chosen_label = top_label
-  chosen_confidence = top_confidence
-
-  if prefer_non_uncertain and top_label == uncertain_label and second_label != uncertain_label and second_confidence >= min_second_confidence:
-    chosen_index = second_index
-    chosen_label = second_label
-    chosen_confidence = second_confidence
-
+  problem_type = meta.get("problem_type") or "multiclass"
   power_w = _power_from_sample(_LAST_RAW_SAMPLE)
-  power_range = meta.get("power_range") or {}
-  if chosen_label not in ("uncertain", "idle"):
-    label_range = power_range.get(chosen_label)
-    if label_range and not (label_range[0] <= power_w <= label_range[1] * 1.2):
-      for alt_index in top3_indices[1:]:
-        alt_label = labels[alt_index]
-        alt_range = power_range.get(alt_label)
-        alt_confidence = float(probs[alt_index]) * 100.0
-        if alt_range and alt_range[0] <= power_w <= alt_range[1] * 1.2:
-          chosen_index = alt_index
-          chosen_label = alt_label
-          chosen_confidence = alt_confidence
-          break
+
+  if problem_type == "multilabel":
+    devices = meta.get("devices") or labels
+    threshold = float(meta.get("threshold") or 0.5)
+    active_indices = [index for index, prob in enumerate(probs) if float(prob) >= threshold]
+    active_labels = [labels[index] for index in active_indices]
+    lookup = _multilabel_name_lookup(meta)
+
+    raw_label = lookup.get(frozenset(active_labels))
+    if not raw_label:
+      raw_label = "idle" if not active_labels else "+".join(active_labels)
+
+    _PRED_QUEUE.append(raw_label)
+    chosen_label = _majority_vote_label() or raw_label
+    chosen_active_devices = _active_devices_from_label(chosen_label, devices)
+    if chosen_active_devices:
+      chosen_indices = [labels.index(device) for device in chosen_active_devices if device in labels]
+      chosen_confidence = float(np.mean([float(probs[index]) for index in chosen_indices])) * 100.0
+    else:
+      chosen_confidence = max(0.0, 1.0 - float(np.max(probs))) * 100.0
+
+    chosen_index = top_index
+    smoothing = f"vote:{_PRED_QUEUE.maxlen}"
+  else:
+    prefer_non_uncertain = bool((payload or {}).get("prefer_non_uncertain", True))
+    uncertain_label = str((payload or {}).get("uncertain_label", "uncertain"))
+    min_second_confidence = float((payload or {}).get("min_second_confidence", 25.0))
+
+    chosen_index = top_index
+    chosen_label = top_label
+    chosen_confidence = top_confidence
+
+    if prefer_non_uncertain and top_label == uncertain_label and second_label != uncertain_label and second_confidence >= min_second_confidence:
+      chosen_index = second_index
+      chosen_label = second_label
+      chosen_confidence = second_confidence
+
+    power_range = meta.get("power_range") or {}
+    if chosen_label not in ("uncertain", "idle"):
+      label_range = power_range.get(chosen_label)
+      if label_range and not (label_range[0] <= power_w <= label_range[1] * 1.2):
+        for alt_index in top3_indices[1:]:
+          alt_label = labels[alt_index]
+          alt_range = power_range.get(alt_label)
+          alt_confidence = float(probs[alt_index]) * 100.0
+          if alt_range and alt_range[0] <= power_w <= alt_range[1] * 1.2:
+            chosen_index = alt_index
+            chosen_label = alt_label
+            chosen_confidence = alt_confidence
+            break
 
   buffer_status = "READY" if received_len >= seq_len else "LOADING"
   buffer_bar = _format_buffer_bar(received_len, seq_len)
   print(
-    f"[{_REQUEST_COUNT:05d}] Buffer {received_len}/99 {buffer_bar} {buffer_status} | "
+    f"[{_REQUEST_COUNT:05d}] Buffer {received_len}/{seq_len} {buffer_bar} {buffer_status} | "
     f"Detected {chosen_label} ({chosen_confidence:.1f}%) | "
     f"Top {top_label} ({top_confidence:.1f}%) | "
     f"smoothing={smoothing}{'' if alpha is None else f' alpha={alpha:.2f}'}"
@@ -727,7 +917,7 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
     "timestamp": _now_iso(),
     "buffer": {
       "received": received_len,
-      "window": 99,
+      "window": seq_len,
       "status": buffer_status,
       "bar": buffer_bar,
     },
@@ -898,9 +1088,11 @@ def ingest():
   sample = _normalize_sample(payload)
 
   with _LOCK:
+    _ensure_runtime_state()
     if _should_reset_buffer_for_device_change(sample):
       _SEQ_BUFFER.clear()
       _EMA_PROBS = None
+      _PRED_QUEUE.clear()
 
     try:
       features = _extract_features_from_sample(sample)
@@ -943,7 +1135,9 @@ def thingsboard_ingest():
 def reset():
   global _EMA_PROBS, _LAST_RAW_SAMPLE, _PREV_POWER, _LATEST_RESULT
   with _LOCK:
+    _ensure_runtime_state()
     _SEQ_BUFFER.clear()
+    _PRED_QUEUE.clear()
     _EMA_PROBS = None
     _LAST_RAW_SAMPLE = None
     _PREV_POWER = None

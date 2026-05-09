@@ -33,14 +33,19 @@ interface RawMetaNilm {
   model_version?: string;
   keras_version?: string;
   date_saved?: string;
+  feature_cols?: string[];
   n_features?: number;
   window_size?: number;
+  stride?: number;
+  n_devices?: number;
   n_classes?: number;
+  threshold?: number;
+  devices?: string[];
   classes?: string[];
 }
 
 function getModelDir() {
-  return process.env.NILM_MODEL_DIR?.trim() || path.join(process.cwd(), "src", "best_nilm_model (1).keras");
+  return process.env.NILM_MODEL_DIR?.trim() || path.join(process.cwd(), "src", "nilm_models_v9");
 }
 
 export async function readModelLabels(): Promise<string[]> {
@@ -64,6 +69,10 @@ export async function readModelLabels(): Promise<string[]> {
   }
 
   const metaNilm = await readMetaNilm(modelDir);
+  if (metaNilm?.devices?.length) {
+    return metaNilm.devices.map((label) => label.trim()).filter(Boolean);
+  }
+
   if (metaNilm?.classes?.length) {
     return metaNilm.classes.map((label) => label.trim()).filter(Boolean);
   }
@@ -87,10 +96,7 @@ async function readMetaNilm(modelDir: string): Promise<RawMetaNilm | null> {
   try {
     const raw = await readFile(path.join(modelDir, "meta_nilm.json"), "utf8");
     const meta = JSON.parse(raw) as RawMetaNilm;
-
-    if (meta.classes && Array.isArray(meta.classes)) {
-      return meta;
-    }
+    return meta;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("ENOENT")) {
@@ -107,6 +113,15 @@ export async function readTrainedModelInfo(): Promise<TrainedModelInfo> {
 
   if (metaNilm) {
     const labels = await readModelLabels();
+    const usesDeviceOutputs = Array.isArray(metaNilm.devices) && metaNilm.devices.length > 0;
+    const outputUnits = usesDeviceOutputs
+      ? metaNilm.n_devices ?? labels.length
+      : metaNilm.n_classes ?? labels.length;
+    const outputActivation = usesDeviceOutputs ? "sigmoid" : "softmax";
+    const featureCols = Array.isArray(metaNilm.feature_cols)
+      ? metaNilm.feature_cols.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+
     return {
       model_name: metaNilm.model_version ?? path.basename(modelDir),
       keras_version: metaNilm.keras_version ?? "unknown",
@@ -114,15 +129,23 @@ export async function readTrainedModelInfo(): Promise<TrainedModelInfo> {
       input_shape: [metaNilm.window_size ?? 0, metaNilm.n_features ?? 0].filter(
         (value): value is number => typeof value === "number" && value > 0,
       ),
-      output_units: metaNilm.n_classes ?? labels.length,
-      output_activation: "softmax",
+      output_units: outputUnits,
+      output_activation: outputActivation,
       total_layers: 0,
       architecture: [],
       notes: [
         "Model NILM dibaca dari file meta_nilm.json.",
-        `Memori input menggunakan window_size=${metaNilm.window_size} dan n_features=${metaNilm.n_features}.`,
-        `Output model memiliki ${metaNilm.n_classes ?? labels.length} kelas.`,
-        `Label model:${labels.length > 0 ? ` ${labels.join(", ")}` : " (placeholder unknown_*)"}`,
+        `Input model memakai window_size=${metaNilm.window_size ?? "unknown"}, n_features=${metaNilm.n_features ?? "unknown"}, stride=${metaNilm.stride ?? "unknown"}.`,
+        usesDeviceOutputs
+          ? `Output model bersifat multi-label dengan ${outputUnits} device output dan aktivasi ${outputActivation}.`
+          : `Output model memiliki ${outputUnits} kelas dengan aktivasi ${outputActivation}.`,
+        `Label runtime:${labels.length > 0 ? ` ${labels.join(", ")}` : " (placeholder unknown_*)"}`,
+        featureCols.length > 0
+          ? `Urutan fitur input: ${featureCols.join(", ")}.`
+          : "Urutan fitur input tidak tersedia di metadata.",
+        typeof metaNilm.threshold === "number"
+          ? `Threshold aktivasi device di metadata: ${metaNilm.threshold}.`
+          : "Threshold aktivasi device tidak tersedia di metadata.",
         "Pastikan inferensi menggunakan preprocessing fitur dan window size yang sama seperti saat training.",
       ],
     };

@@ -386,7 +386,7 @@ export default function HomePage() {
               <p className="text-sm font-medium text-slate-500">Inference Note</p>
               <p className="mt-2 text-base leading-7 text-slate-700">
                 {data
-                  ? "Model NILM mengklasifikasikan pola konsumsi dari agregat daya menjadi perangkat spesifik."
+                  ? "Model NILM multi-label memetakan pola konsumsi agregat menjadi satu atau lebih perangkat aktif."
                   : "Data inferensi akan tampil setelah sensor mengirim pembacaan terbaru."}
               </p>
             </div>
