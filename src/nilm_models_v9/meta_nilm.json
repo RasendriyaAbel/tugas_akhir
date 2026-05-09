@@ -1,0 +1,165 @@
+{
+  "model_version": "v9_multilabel",
+  "feature_cols": [
+    "voltage",
+    "current",
+    "power",
+    "power_factor",
+    "frequency",
+    "apparent_power",
+    "reactive_power",
+    "power_ratio"
+  ],
+  "n_features": 8,
+  "window_size": 30,
+  "stride": 3,
+  "devices": [
+    "charger_hp",
+    "hair_dryer",
+    "kipas",
+    "laptop"
+  ],
+  "n_devices": 4,
+  "threshold": 0.5,
+  "session_to_label": {
+    "S-00": "idle",
+    "S-01": "charger_hp",
+    "S-02": "hair_dryer",
+    "S-03": "hair_dryer+charger_hp",
+    "S-04": "kipas",
+    "S-05": "kipas+charger_hp",
+    "S-06": "kipas+hair_dryer",
+    "S-07": "kipas+hair_dryer+charger_hp",
+    "S-08": "laptop",
+    "S-09": "laptop+charger_hp",
+    "S-10": "laptop+hair_dryer",
+    "S-11": "laptop+hair_dryer+charger_hp",
+    "S-12": "laptop+kipas",
+    "S-13": "laptop+kipas+charger_hp",
+    "S-14": "laptop+kipas+hair_dryer",
+    "S-15": "full_load"
+  },
+  "scaler_mean": [
+    211.66253653344214,
+    0.7610940939364774,
+    155.18671124123375,
+    0.8743863308948425,
+    49.9770553662939,
+    160.40226923887013,
+    21.02049079851811,
+    0.8735106816120494
+  ],
+  "scaler_scale": [
+    2.8755651800213737,
+    0.5089095145274471,
+    110.53540086447983,
+    0.19709166563901917,
+    0.042047260837906615,
+    106.78158739923923,
+    16.521222148019216,
+    0.1965758753091003
+  ],
+  "noise_floor_w": 3.0,
+  "smooth_n": 5,
+  "transition_delta": 30.0,
+  "pos_weight": [
+    1.021377682685852,
+    1.035885214805603,
+    1.035885214805603,
+    1.0506024360656738
+  ],
+  "best_epoch": 90,
+  "best_val_auc": 0.999602,
+  "exact_match": 0.971014,
+  "macro_f1": 0.991012,
+  "training_samples": 851,
+  "val_samples": 207,
+  "power_range": {
+    "idle": [
+      0,
+      20
+    ],
+    "charger_hp": [
+      5,
+      25
+    ],
+    "hair_dryer": [
+      200,
+      260
+    ],
+    "hair_dryer+charger_hp": [
+      210,
+      270
+    ],
+    "kipas": [
+      20,
+      50
+    ],
+    "kipas+charger_hp": [
+      25,
+      60
+    ],
+    "kipas+hair_dryer": [
+      220,
+      280
+    ],
+    "kipas+hair_dryer+charger_hp": [
+      230,
+      290
+    ],
+    "laptop": [
+      50,
+      100
+    ],
+    "laptop+charger_hp": [
+      55,
+      105
+    ],
+    "laptop+hair_dryer": [
+      255,
+      310
+    ],
+    "laptop+hair_dryer+charger_hp": [
+      260,
+      315
+    ],
+    "laptop+kipas": [
+      50,
+      100
+    ],
+    "laptop+kipas+charger_hp": [
+      55,
+      110
+    ],
+    "laptop+kipas+hair_dryer": [
+      270,
+      320
+    ],
+    "full_load": [
+      260,
+      345
+    ]
+  },
+  "phys_bounds": {
+    "voltage": [
+      100.0,
+      260.0
+    ],
+    "current": [
+      0.0,
+      100.0
+    ],
+    "power": [
+      0.0,
+      22000.0
+    ],
+    "frequency": [
+      45.0,
+      65.0
+    ],
+    "power_factor": [
+      0.0,
+      1.0
+    ]
+  }
+}

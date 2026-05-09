@@ -29,6 +29,16 @@ interface RawLabels {
   labels?: string[];
 }
 
+interface RawMetaNilm {
+  model_version?: string;
+  keras_version?: string;
+  date_saved?: string;
+  n_features?: number;
+  window_size?: number;
+  n_classes?: number;
+  classes?: string[];
+}
+
 function getModelDir() {
   return process.env.NILM_MODEL_DIR?.trim() || path.join(process.cwd(), "src", "best_nilm_model (1).keras");
 }
@@ -53,6 +63,11 @@ export async function readModelLabels(): Promise<string[]> {
     }
   }
 
+  const metaNilm = await readMetaNilm(modelDir);
+  if (metaNilm?.classes?.length) {
+    return metaNilm.classes.map((label) => label.trim()).filter(Boolean);
+  }
+
   const configRaw = await readFile(path.join(modelDir, "config.json"), "utf8");
   const config = JSON.parse(configRaw) as RawModelConfig;
   const layers = config.config?.layers ?? [];
@@ -68,8 +83,51 @@ export async function readModelLabels(): Promise<string[]> {
   return Array.from({ length: outputUnits }, (_, index) => `unknown_${index}`);
 }
 
+async function readMetaNilm(modelDir: string): Promise<RawMetaNilm | null> {
+  try {
+    const raw = await readFile(path.join(modelDir, "meta_nilm.json"), "utf8");
+    const meta = JSON.parse(raw) as RawMetaNilm;
+
+    if (meta.classes && Array.isArray(meta.classes)) {
+      return meta;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("ENOENT")) {
+      throw error;
+    }
+  }
+
+  return null;
+}
+
 export async function readTrainedModelInfo(): Promise<TrainedModelInfo> {
   const modelDir = getModelDir();
+  const metaNilm = await readMetaNilm(modelDir);
+
+  if (metaNilm) {
+    const labels = await readModelLabels();
+    return {
+      model_name: metaNilm.model_version ?? path.basename(modelDir),
+      keras_version: metaNilm.keras_version ?? "unknown",
+      saved_at: metaNilm.date_saved ?? "unknown",
+      input_shape: [metaNilm.window_size ?? 0, metaNilm.n_features ?? 0].filter(
+        (value): value is number => typeof value === "number" && value > 0,
+      ),
+      output_units: metaNilm.n_classes ?? labels.length,
+      output_activation: "softmax",
+      total_layers: 0,
+      architecture: [],
+      notes: [
+        "Model NILM dibaca dari file meta_nilm.json.",
+        `Memori input menggunakan window_size=${metaNilm.window_size} dan n_features=${metaNilm.n_features}.`,
+        `Output model memiliki ${metaNilm.n_classes ?? labels.length} kelas.`,
+        `Label model:${labels.length > 0 ? ` ${labels.join(", ")}` : " (placeholder unknown_*)"}`,
+        "Pastikan inferensi menggunakan preprocessing fitur dan window size yang sama seperti saat training.",
+      ],
+    };
+  }
+
   const [metadataRaw, configRaw, labels] = await Promise.all([
     readFile(path.join(modelDir, "metadata.json"), "utf8"),
     readFile(path.join(modelDir, "config.json"), "utf8"),

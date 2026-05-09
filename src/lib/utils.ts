@@ -91,24 +91,24 @@ export function isDataStale(timestamp?: string | null, refreshInterval = 3000) {
 }
 
 export function normalizeDeviceName(device: string) {
-  return device.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  return device
+    .replaceAll("_", " ")
+    .replaceAll("+", " + ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => {
+      if (token.toLowerCase() === "hp") {
+        return "HP";
+      }
+      return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+    })
+    .join(" ");
 }
 
 export function formatDeviceLabel(device: string) {
-  const normalized = device.trim().toLowerCase();
-  const map: Record<string, string> = {
-    charger_hp: "Charger HP",
-    rice_cooker: "Rice Cooker",
-    fan_room: "Kipas",
-    laptop_charger: "Charger Laptop",
-    desk_lamp: "Lampu Meja",
-    uncertain: "Uncertain",
-    other: "Lainnya",
-    idle: "Idle",
-  };
-
-  return map[normalized] ?? normalizeDeviceName(device);
+  return normalizeDeviceName(device);
 }
+
 
 export function getConfidenceLabel(confidence: number) {
   if (confidence >= 85) {

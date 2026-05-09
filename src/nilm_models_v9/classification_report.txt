@@ -1,0 +1,9 @@
+Hamming Loss : 0.0085
+Exact Match  : 97.10%
+Macro F1     : 0.9910
+
+Device                Precision     Recall         F1    Support
+  charger_hp               0.9794     0.9694     0.9744         98
+  hair_dryer               0.9897     0.9897     0.9897         97
+  kipas                    1.0000     1.0000     1.0000        100
+  laptop                   1.0000     1.0000     1.0000         96

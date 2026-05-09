@@ -153,7 +153,10 @@ async function resolveDeviceId() {
 
   const accessToken = getThingsBoardDeviceToken();
   if (!accessToken) {
-    throw new Error("THINGSBOARD_ACCESS_TOKEN belum diatur.");
+    throw new Error(
+      "THINGSBOARD_DEVICE_ID atau THINGSBOARD_ACCESS_TOKEN belum diatur. " +
+      "Gunakan deviceId atau access token agar ThingsBoard dapat menemukan perangkat."
+    );
   }
 
   const payload = await thingsBoardFetchJson<ThingsBoardDeviceInfo>(
@@ -181,11 +184,10 @@ function getLatestValue(points: TelemetryPoint[] | undefined, key: MetricField) 
 
 export async function fetchLatestThingsBoardDataWithMeta(): Promise<{ data: NilmData; notice?: string }> {
   const baseUrl = getThingsBoardBaseUrl();
-  const accessToken = getThingsBoardDeviceToken();
   const envJwt = getThingsBoardJwtToken();
 
-  if (!accessToken) {
-    throw new Error("THINGSBOARD_ACCESS_TOKEN belum diatur.");
+  if (!baseUrl) {
+    throw new Error("THINGSBOARD_BASE_URL belum diatur.");
   }
 
   const deviceId = await resolveDeviceId();
@@ -212,11 +214,32 @@ export async function fetchLatestThingsBoardDataWithMeta(): Promise<{ data: Nilm
     power_factor: getLatestValue(telemetry[TELEMETRY_KEY_MAP.power_factor], "power_factor"),
   };
 
-  const inference = await inferFromMlService(sample);
+  let inference;
   const notices: string[] = [];
 
-  if (inference.label_source === "generated") {
-    notices.push("Label model masih placeholder unknown_* karena mapping label final belum tersedia.");
+  try {
+    inference = await inferFromMlService(sample);
+
+    if (inference.label_source === "meta_nilm.json") {
+      notices.push("Label inferensi berasal dari file meta_nilm.json.");
+    } else if (inference.label_source === "generated") {
+      notices.push("Label model masih placeholder unknown_* karena mapping label final belum tersedia.");
+    }
+
+    if (inference.buffer?.status && inference.buffer.status !== "READY") {
+      notices.push(`Buffer inferensi model masih ${inference.buffer.status.toLowerCase()}. Prediksi awal dapat berubah.`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown ML service error";
+    notices.push(`ML service tidak dapat diakses (${message}). Menggunakan fallback label unknown dan confidence 0.`);
+    inference = {
+      success: false,
+      label: "unknown",
+      confidence: 0,
+      model_version: "N/A",
+      timestamp: new Date().toISOString(),
+      label_source: "fallback",
+    };
   }
 
   if (inference.buffer?.status && inference.buffer.status !== "READY") {

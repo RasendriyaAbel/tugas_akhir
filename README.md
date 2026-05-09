@@ -46,6 +46,7 @@ npm run start
 Buat file `.env.local` di root project:
 
 ```env
+NILM_MODEL_DIR=src/nilm_models_v9
 NILM_DATA_SOURCE=thingsboard
 THINGSBOARD_ACCESS_TOKEN=token_device_esp32
 THINGSBOARD_BASE_URL=https://your-thingsboard-host

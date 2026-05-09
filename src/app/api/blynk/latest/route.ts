@@ -37,6 +37,7 @@ export async function GET() {
       } satisfies LatestBlynkResponse);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown ThingsBoard error";
+      const isConfigError = /belum diatur|belum lengkap|tidak berhasil ditemukan/i.test(message);
 
       return NextResponse.json(
         {
@@ -46,7 +47,7 @@ export async function GET() {
           last_updated: new Date().toISOString(),
           error: `ThingsBoard connection error: ${message}`,
         } satisfies LatestBlynkResponse,
-        { status: 502 },
+        { status: isConfigError ? 503 : 502 },
       );
     }
   }
