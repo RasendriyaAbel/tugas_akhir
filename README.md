@@ -47,6 +47,8 @@ Buat file `.env.local` di root project:
 
 ```env
 NILM_MODEL_DIR=src/nilm_models_v9
+# atau jika ingin gunakan format file alias yang kadang dipakai VS Code:
+# NILM_MODEL_DIR=@file:src/nilm_models_v9
 NILM_DATA_SOURCE=thingsboard
 THINGSBOARD_ACCESS_TOKEN=token_device_esp32
 THINGSBOARD_BASE_URL=https://your-thingsboard-host

@@ -169,7 +169,7 @@ export async function fetchLatestBlynkDataWithMeta(token: string): Promise<{ dat
     inferredModelVersion = inference.model_version ?? inferredModelVersion;
     inferredTimestamp = inference.timestamp ?? inferredTimestamp;
 
-    if (inference.label_source === "meta_nilm.json") {
+    if (inference.label_source?.startsWith("meta_nilm.json")) {
       notices.push("Label inferensi berasal dari file meta_nilm.json.");
     } else if (inference.label_source === "generated") {
       notices.push("Label model belum tersedia di file training, sehingga output saat ini memakai placeholder unknown_*.");

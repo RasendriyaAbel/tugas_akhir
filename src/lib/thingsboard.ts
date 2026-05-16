@@ -220,7 +220,7 @@ export async function fetchLatestThingsBoardDataWithMeta(): Promise<{ data: Nilm
   try {
     inference = await inferFromMlService(sample);
 
-    if (inference.label_source === "meta_nilm.json") {
+    if (inference.label_source?.startsWith("meta_nilm.json")) {
       notices.push("Label inferensi berasal dari file meta_nilm.json.");
     } else if (inference.label_source === "generated") {
       notices.push("Label model masih placeholder unknown_* karena mapping label final belum tersedia.");

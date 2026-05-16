@@ -44,8 +44,23 @@ interface RawMetaNilm {
   classes?: string[];
 }
 
+function normalizeModelDir(value: string): string {
+  let normalized = value.trim();
+  if (normalized.startsWith("@file:")) {
+    normalized = normalized.slice("@file:".length);
+  }
+  if (normalized.startsWith("file://")) {
+    normalized = normalized.slice("file://".length);
+  }
+  if (normalized.startsWith("file:")) {
+    normalized = normalized.slice("file:".length);
+  }
+  return normalized;
+}
+
 function getModelDir() {
-  return process.env.NILM_MODEL_DIR?.trim() || path.join(process.cwd(), "src", "nilm_models_v9");
+  const raw = process.env.NILM_MODEL_DIR?.trim();
+  return raw ? normalizeModelDir(raw) : path.join(process.cwd(), "src", "nilm_models_v9");
 }
 
 export async function readModelLabels(): Promise<string[]> {

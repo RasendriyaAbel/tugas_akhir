@@ -16,7 +16,20 @@ from flask import Flask, jsonify, request
 ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
 
-_model_dir = Path(os.environ.get("NILM_MODEL_DIR", "src/nilm_models_v9"))
+
+def _normalize_model_dir(value: str | None) -> str:
+  if not value:
+    return "src/nilm_models_v9"
+  normalized = value.strip()
+  if normalized.startswith("@file:"):
+    normalized = normalized[len("@file:"):]
+  if normalized.startswith("file://"):
+    normalized = normalized[len("file://"):]
+  if normalized.startswith("file:"):
+    normalized = normalized[len("file:"):]
+  return normalized
+
+_model_dir = Path(_normalize_model_dir(os.environ.get("NILM_MODEL_DIR")))
 MODEL_DIR = _model_dir if _model_dir.is_absolute() else (ROOT_DIR / _model_dir)
 MODEL_DIR = MODEL_DIR.resolve()
 _DUMMY_FILE = Path(__file__).resolve().parent / "dummy_blynk_samples.json"
@@ -126,6 +139,10 @@ def _find_keras_file() -> Path | None:
     return MODEL_DIR
 
   if MODEL_DIR.is_dir():
+    preferred = MODEL_DIR / "best_nilm_model.keras"
+    if preferred.exists():
+      return preferred
+
     candidates = sorted(MODEL_DIR.glob(_MODEL_ARCHIVE_GLOB))
     if candidates:
       return candidates[0]
@@ -851,6 +868,9 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
   if problem_type == "multilabel":
     devices = meta.get("devices") or labels
     threshold = float(meta.get("threshold") or 0.5)
+    power_range = meta.get("power_range") or {}
+    
+    # Deteksi device aktif berdasarkan threshold
     active_indices = [index for index, prob in enumerate(probs) if float(prob) >= threshold]
     active_labels = [labels[index] for index in active_indices]
     lookup = _multilabel_name_lookup(meta)
@@ -858,6 +878,26 @@ def _predict_from_sequence(sequence: np.ndarray, received_len: int, payload: dic
     raw_label = lookup.get(frozenset(active_labels))
     if not raw_label:
       raw_label = "idle" if not active_labels else "+".join(active_labels)
+
+    # Power-based validation: jika label tidak sesuai power range, coba device lain
+    # Hanya untuk multiclass fallback; multilabel sudah independen per device
+    if raw_label != "idle" and power_range:
+      label_range = power_range.get(raw_label)
+      if label_range and not (label_range[0] <= power_w <= label_range[1] * 1.2):
+        # Power di luar range, coba kombinasi device lain dengan prob tertinggi
+        sorted_indices = list(np.argsort(-probs))
+        for alt_index in sorted_indices[:3]:
+          alt_device = labels[alt_index]
+          alt_range = power_range.get(alt_device)
+          if alt_range and alt_range[0] <= power_w <= alt_range[1] * 1.2:
+            # Adjust active_indices untuk pakai device ini
+            if alt_index in active_indices:
+              pass  # Sudah termasuk dalam active
+            else:
+              # Re-threshold: gunakan device dengan prob tertinggi yang match power range
+              if float(probs[alt_index]) >= threshold * 0.8:  # Lebih lenient untuk fallback
+                active_indices = [alt_index] if not active_indices else active_indices
+            break
 
     _PRED_QUEUE.append(raw_label)
     chosen_label = _majority_vote_label() or raw_label

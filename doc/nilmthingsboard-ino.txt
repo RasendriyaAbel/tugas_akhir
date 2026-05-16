@@ -1,0 +1,303 @@
+// ==========================================
+// ESP32-S3 + PZEM004T
+// ThingsBoard (MQTT) + Firebase (RTDB)
+// NILM Deep Learning Monitoring
+// ==========================================
+
+#include <Arduino.h>
+#include <PZEM004Tv30.h>
+#include <WiFi.h>
+
+// ThingsBoard (MQTT)
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// Firebase
+#include <Firebase_ESP_Client.h>
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+// ==========================================
+// KONFIGURASI WIFI
+// ==========================================
+const char* ssid     = "Los Kontraktor";
+const char* password = "muentasabatang";
+
+// ==========================================
+// KONFIGURASI THINGSBOARD (MQTT)
+// ==========================================
+const char* TB_SERVER = "mqtt.eu.thingsboard.cloud";
+const int   TB_PORT   =  1883;
+const char* TB_TOKEN  = "j9b5wdiw5xrw4lmmffq0";
+const char* TB_TOPIC  = "v1/devices/me/telemetry";
+
+// ==========================================
+// KONFIGURASI FIREBASE
+// ==========================================
+#define FIREBASE_API_KEY       "AIzaSyD9D0O5NX6gnynRTIZZrcgTXmigY6JYjQI"
+#define FIREBASE_DATABASE_URL  "https://nilm-deep-learning-default-rtdb.firebaseio.com"
+#define FIREBASE_USER_EMAIL    "esp32pzem@gmail.com"
+#define FIREBASE_USER_PASSWORD "esp32pzemdhika"
+
+// ==========================================
+// KONFIGURASI PIN ESP32-S3
+// TX PZEM -> RX ESP (Pin 18)
+// RX PZEM -> TX ESP (Pin 17)
+// ==========================================
+#define PZEM_RX_PIN 18
+#define PZEM_TX_PIN 17
+
+HardwareSerial PZEMSerial(2);
+PZEM004Tv30 pzem(PZEMSerial, PZEM_RX_PIN, PZEM_TX_PIN);
+
+// ==========================================
+// OBJECT CLIENTS
+// ==========================================
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
+int status = WL_IDLE_STATUS;
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// ==========================================
+// VARIABEL DATA NILM
+// (akan diupdate dari backend/inference)
+// ==========================================
+float  g_pct_deteksi     = 0.0;
+String g_jenis_perangkat = "Tidak ada";
+
+// ==========================================
+// FLAGS & TIMER
+// ==========================================
+bool firebaseReady = false;
+
+unsigned long lastKirim     = 0;
+const unsigned long INTERVAL = 2000; // kirim tiap 2 detik
+
+// ==========================================
+// FUNGSI: KONEKSI WIFI
+// ==========================================
+void connectWiFi() {
+  Serial.print("Menghubungkan ke WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.println("WiFi terhubung!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ==========================================
+// FUNGSI: SETUP FIREBASE
+// ==========================================
+void setupFirebase() {
+  Serial.print("Menghubungkan ke Firebase");
+
+  config.api_key               = FIREBASE_API_KEY;
+  config.database_url          = FIREBASE_DATABASE_URL;
+  auth.user.email              = FIREBASE_USER_EMAIL;
+  auth.user.password           = FIREBASE_USER_PASSWORD;
+  config.token_status_callback = tokenStatusCallback;
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Tunggu Firebase siap maksimal 10 detik
+  unsigned long wait = millis();
+  while (!Firebase.ready() && millis() - wait < 10000) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+
+  if (Firebase.ready()) {
+    Serial.println("Firebase terhubung!");
+    firebaseReady = true;
+  } else {
+    Serial.println("Firebase timeout, lanjut tanpa Firebase.");
+  }
+}
+
+// ==========================================
+// FUNGSI: RECONNECT MQTT KE THINGSBOARD
+// ==========================================
+void reconnectMQTT() {
+  while (!mqttClient.connected()) {
+
+    // Buat Client ID unik pakai char array (bukan String)
+    char clientId[32];
+    snprintf(clientId, sizeof(clientId), "ESP32-NILM-%lu", millis());
+
+    Serial.print("Connecting dengan clientId: ");
+    Serial.println(clientId);
+    Serial.print("Token: ");
+    Serial.println(TB_TOKEN);
+
+    if (mqttClient.connect(clientId, TB_TOKEN, "")) {
+      Serial.println("ThingsBoard terhubung!");
+    } else {
+      Serial.print("Gagal rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(", coba lagi 3 detik...");
+      delay(3000);
+    }
+  }
+}
+
+// ==========================================
+// FUNGSI: KIRIM KE THINGSBOARD via MQTT
+// ==========================================
+void kirimThingsBoard(float voltage, float current, float power,
+                      float energy, float frequency, float pf) {
+  // Semua 8 parameter dalam 1 publish = hemat & efisien
+  StaticJsonDocument<512> doc;
+  doc["tegangan"]     = voltage;
+  doc["arus"]         = current;
+  doc["daya"]         = power;
+  doc["kwh"]          = energy;
+  doc["frekuensi"]    = frequency;
+  doc["power_factor"] = pf;
+  doc["pct_deteksi"]  = g_pct_deteksi;
+  doc["perangkat"]    = g_jenis_perangkat;
+
+  char payload[512];
+  serializeJson(doc, payload);
+
+  if (mqttClient.publish(TB_TOPIC, payload)) {
+    Serial.println("[ThingsBoard] Data terkirim!");
+  } else {
+    Serial.println("[ThingsBoard] Gagal kirim!");
+  }
+}
+
+// ==========================================
+// FUNGSI: KIRIM KE FIREBASE (RAW LOGGING)
+// ==========================================
+void kirimFirebase(float voltage, float current, float power,
+                   float energy, float frequency, float pf) {
+  if (!firebaseReady || !Firebase.ready()) {
+    Serial.println("[Firebase] Belum siap, skip.");
+    return;
+  }
+
+  // Key pakai millis() biar unik, tidak overwrite
+  String path = "/pzem_data/" + String(millis());
+
+  FirebaseJson json;
+  json.set("timestamp",    (unsigned long)(millis() / 1000));
+  json.set("tegangan",     voltage);
+  json.set("arus",         current);
+  json.set("daya",         power);
+  json.set("kwh",          energy);
+  json.set("frekuensi",    frequency);
+  json.set("power_factor", pf);
+  json.set("pct_deteksi",  g_pct_deteksi);
+  json.set("perangkat",    g_jenis_perangkat.c_str());
+
+  if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
+    Serial.printf("[Firebase] OK → %s\n", path.c_str());
+  } else {
+    Serial.printf("[Firebase] Gagal: %s\n", fbdo.errorReason().c_str());
+  }
+}
+
+// ==========================================
+// FUNGSI: BACA SENSOR + KIRIM KE SEMUA
+// ==========================================
+void bacaDanKirim() {
+  // ── Baca PZEM ─────────────────────────
+  float voltage   = pzem.voltage();
+  float current   = pzem.current();
+  float power     = pzem.power();
+  float energy    = pzem.energy();
+  float frequency = pzem.frequency();
+  float pf        = pzem.pf();
+
+  Serial.println("──────────────────────────────────");
+
+  // Cek pembacaan gagal
+  if (isnan(voltage)) {
+    Serial.println("GAGAL baca PZEM! Cek wiring.");
+    return;
+  }
+
+  // Handle NaN individual
+  float safeArus  = isnan(current)   ? 0.0 : current;
+  float safeDaya  = isnan(power)     ? 0.0 : power;
+  float safeKwh   = isnan(energy)    ? 0.0 : energy;
+  float safeFreq  = isnan(frequency) ? 0.0 : frequency;
+  float safePF    = isnan(pf)        ? 0.0 : pf;
+
+  // ── Serial monitor ────────────────────
+  Serial.printf("Tegangan     : %.2f V\n",   voltage);
+  Serial.printf("Arus         : %.3f A\n",   safeArus);
+  Serial.printf("Daya         : %.2f W\n",   safeDaya);
+  Serial.printf("kWh          : %.3f kWh\n", safeKwh);
+  Serial.printf("Frekuensi    : %.1f Hz\n",  safeFreq);
+  Serial.printf("Power Factor : %.2f\n",     safePF);
+  Serial.printf("Perangkat    : %s\n",       g_jenis_perangkat.c_str());
+  Serial.printf("Akurasi      : %.1f%%\n",   g_pct_deteksi);
+  Serial.println("──────────────────────────────────");
+
+  // ── Kirim ke ThingsBoard (monitoring) ─
+  kirimThingsBoard(voltage, safeArus, safeDaya,
+                   safeKwh, safeFreq, safePF);
+
+  // ── Kirim ke Firebase (logging CSV) ───
+  kirimFirebase(voltage, safeArus, safeDaya,
+                safeKwh, safeFreq, safePF);
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  Serial.println();
+  Serial.println("============================================");
+  Serial.println("  ESP32-S3 + PZEM + ThingsBoard + Firebase ");
+  Serial.println("  NILM Deep Learning Monitoring            ");
+  Serial.println("============================================\n");
+
+  // 1. Koneksi WiFi
+  connectWiFi();
+
+  // 2. Setup MQTT ThingsBoard
+  mqttClient.setServer(TB_SERVER, TB_PORT);
+  mqttClient.setBufferSize(512);
+
+  // 3. Setup Firebase
+  setupFirebase();
+
+  Serial.println("\nSetup selesai! Mulai kirim data...\n");
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  // Jaga koneksi WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi putus! Reconnecting...");
+    connectWiFi();
+  }
+
+  // Jaga koneksi MQTT
+  if (!mqttClient.connected()) {
+    reconnectMQTT();
+  }
+  mqttClient.loop();
+
+  // Kirim data tiap 2 detik
+  if (millis() - lastKirim >= INTERVAL) {
+    bacaDanKirim();
+    lastKirim = millis();
+  }
+}

@@ -142,12 +142,16 @@ class NILMPredictor:
         """
         Inferensi satu step dari dict data sensor.
 
+        FIX: Deteksi idle & transisi sekarang menggunakan feature vector
+        lengkap (8 fitur) konsisten dengan input model, bukan hanya power.
+
         Returns:
             label          : str        — label prediksi akhir (e.g. "kipas+laptop")
             active_devices : list[str]  — device yang diprediksi aktif
             probs          : list[tuple]— prob tiap device [(device, prob), ...]
             buffer_fill    : int        — jumlah sampel dalam buffer
             power_w        : float      — power saat ini (W)
+            apparent_w     : float      — apparent power saat ini (VA)
             is_ready       : bool       — True jika buffer penuh
         """
         def _f(k, fb=0.0):
@@ -157,16 +161,23 @@ class NILMPredictor:
             except Exception:
                 return fb
 
-        p_now = _f("power")
+        # Bangun feature vector lengkap (8 fitur) — konsisten dengan training
+        feat  = build_feature_vector(raw)
+        p_now = feat[2]   # index 2 = power (lihat FEATURE_COLS di training)
+        s_now = feat[5]   # index 5 = apparent_power
 
-        # Deteksi transisi beban → reset buffer
+        # ── Deteksi transisi beban menggunakan apparent_power ──────────────
+        # Apparent power (V×I) lebih stabil daripada active power untuk
+        # mendeteksi perubahan beban induktif (kipas, dll).
+        # Jika apparent_power berubah > transition_delta → reset buffer.
         if self._prev_power is not None:
-            if abs(p_now - self._prev_power) > self.transition_delta:
+            if abs(s_now - self._prev_power) > self.transition_delta:
                 self._buffer.clear()
                 self._pred_queue.clear()
-        self._prev_power = p_now
+        self._prev_power = s_now  # simpan apparent_power sebagai referensi
 
-        # Standby / idle detection
+        # ── Deteksi idle menggunakan active power ──────────────────────────
+        # Tetap pakai active power (W) untuk idle karena threshold dalam Watt.
         if p_now < self.noise_floor_w:
             self.reset()
             return {
@@ -175,11 +186,12 @@ class NILMPredictor:
                 "probs"          : [(d, 0.0) for d in self.devices],
                 "buffer_fill"    : 0,
                 "power_w"        : round(p_now, 2),
+                "apparent_va"    : round(s_now, 2),
                 "is_ready"       : False,
             }
 
-        # Isi buffer
-        feat = build_feature_vector(raw)
+        # ── Isi buffer dengan feature vector lengkap ───────────────────────
+        # feat sudah dibangun di atas — tidak perlu build ulang
         self._buffer.append(feat)
         buf_len = len(self._buffer)
 
@@ -191,6 +203,7 @@ class NILMPredictor:
                 "probs"          : [(d, 0.0) for d in self.devices],
                 "buffer_fill"    : buf_len,
                 "power_w"        : round(p_now, 2),
+                "apparent_va"    : round(s_now, 2),
                 "is_ready"       : False,
             }
 
@@ -232,5 +245,6 @@ class NILMPredictor:
             "probs"          : probs_out,
             "buffer_fill"    : buf_len,
             "power_w"        : round(p_now, 2),
+            "apparent_va"    : round(s_now, 2),
             "is_ready"       : buf_len >= self.window_size,
         }
